@@ -1,61 +1,122 @@
-# Nom du fichier de sortie
-OUTPUT_BIN = myos.bin
-ISO = myos.iso
+# KFS_2 — GDT & Stack
+# Makefile
+#
+# Requirements:
+#   gcc (cross-compile or native with -m32)
+#   nasm
+#   ld  (GNU linker — NOT using host .ld files)
+#   grub-mkrescue + xorriso  (to build a bootable ISO)
+#   qemu-system-i386 or kvm  (to run)
 
-# Compilateur et assembleur
-AS = i686-elf-as
-CC = i686-elf-gcc
+# ─── Toolchain ──────────────────────────────────────────────────────────────
+CC      := gcc
+AS      := nasm
+LD      := ld
+MKISO   := grub-mkrescue
 
-# Options de compilation pour le noyau
-CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra \
-         -fno-builtin -fno-exceptions -fno-stack-protector -fno-rtti -nostdlib -nodefaultlibs
+# ─── Target ─────────────────────────────────────────────────────────────────
+KERNEL  := kfs2.bin
+ISO     := kfs2.iso
 
-# Options de linking
-LDFLAGS = -T src/linker.ld -ffreestanding -O2 -nostdlib
+# ─── Flags ──────────────────────────────────────────────────────────────────
+# -m32              : compile for i386
+# -fno-builtin      : don't use GCC built-in functions (no libc)
+# -fno-exceptions   : no C++ exception tables
+# -fno-stack-protector : no canary (no libc support)
+# -fno-rtti         : no run-time type info
+# -nostdlib         : don't link standard startup files
+# -nodefaultlibs    : don't link default libraries (libc, etc.)
 
-# Liste des fichiers source et objets
-SRC_DIR = src
-SRC_FILES = $(wildcard $(SRC_DIR)/*.c)
-OBJ_FILES = $(SRC_FILES:$(SRC_DIR)/%.c=%.o)
+CFLAGS  := -m32 \
+            -std=c11 \
+            -Wall -Wextra \
+            -O2 \
+            -fno-builtin \
+            -fno-exceptions \
+            -fno-stack-protector \
+            -fno-rtti \
+            -nostdlib \
+            -nodefaultlibs \
+            -Iinclude
 
-# Cibles
-all: $(ISO)
+ASFLAGS := -f elf32
 
-# Assemblage de boot.s en boot.o
-boot.o: $(SRC_DIR)/boot.s
-	$(AS) $(SRC_DIR)/boot.s -o boot.o
+LDFLAGS := -m elf_i386 \
+            -T linker.ld \
+            --nmagic
 
-# Compilation des fichiers .c en fichiers .o
-%.o: $(SRC_DIR)/%.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+# ─── Sources ─────────────────────────────────────────────────────────────────
+C_SRCS  := src/kernel.c \
+            src/gdt.c   \
+            src/printk.c \
+            src/stack.c
 
-# Linker les fichiers objets pour créer le noyau exécutable myos.bin
-$(OUTPUT_BIN): boot.o $(OBJ_FILES)
-	$(CC) $(LDFLAGS) -o $(OUTPUT_BIN) boot.o $(OBJ_FILES) -lgcc
+ASM_SRCS := boot/boot.asm
 
-# Vérification multiboot avec grub-file
-multiboot-check: $(OUTPUT_BIN)
-	@if grub-file --is-x86-multiboot $(OUTPUT_BIN); then \
-	  echo "multiboot confirmed"; \
-	else \
-	  echo "the file is not multiboot"; \
-	  exit 1; \
-	fi
+C_OBJS   := $(C_SRCS:.c=.o)
+ASM_OBJS := $(ASM_SRCS:.asm=.o)
+OBJS     := $(ASM_OBJS) $(C_OBJS)
 
-# Création de l'ISO avec GRUB
-$(ISO): $(OUTPUT_BIN) multiboot-check
-	mkdir -p isodir/boot/grub
-	cp $(OUTPUT_BIN) isodir/boot/
-	echo 'menuentry "myos" {' > isodir/boot/grub/grub.cfg
-	echo '  multiboot /boot/$(OUTPUT_BIN)' >> isodir/boot/grub/grub.cfg
-	echo '}' >> isodir/boot/grub/grub.cfg
-	grub-mkrescue -o $(ISO) isodir
+# ─── Rules ───────────────────────────────────────────────────────────────────
+.PHONY: all clean fclean re iso run run-kvm
 
-# Commande pour lancer QEMU avec l'ISO généré
+all: $(KERNEL)
+
+# Link — use our own linker.ld (NOT the host's)
+$(KERNEL): $(OBJS)
+	$(LD) $(LDFLAGS) -o $@ $^
+	@echo "[LD]  $@"
+	@size $@
+
+# Compile C sources
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+	@echo "[CC]  $<"
+
+# Assemble ASM sources
+%.o: %.asm
+	$(AS) $(ASFLAGS) $< -o $@
+	@echo "[AS]  $<"
+
+# ─── ISO (bootable GRUB image) ───────────────────────────────────────────────
+iso: $(ISO)
+
+$(ISO): $(KERNEL)
+	@mkdir -p iso/boot/grub
+	@cp $(KERNEL) iso/boot/
+	@echo 'set timeout=0'                          >  iso/boot/grub/grub.cfg
+	@echo 'set default=0'                          >> iso/boot/grub/grub.cfg
+	@echo 'menuentry "KFS_2 - GDT & Stack" {'     >> iso/boot/grub/grub.cfg
+	@echo '    multiboot2 /boot/kfs2.bin'           >> iso/boot/grub/grub.cfg
+	@echo '    boot'                               >> iso/boot/grub/grub.cfg
+	@echo '}'                                      >> iso/boot/grub/grub.cfg
+	$(MKISO) -o $@ iso
+	@echo "[ISO] $@"
+
+# ─── Run with QEMU ───────────────────────────────────────────────────────────
 run: $(ISO)
-	qemu-system-i386 -cdrom $(ISO)
+	qemu-system-i386 -cdrom $(ISO) -m 64M
 
-# Nettoyage des fichiers générés
+# ─── Run with KVM (faster) ───────────────────────────────────────────────────
+run-kvm: $(ISO)
+	qemu-system-i386 -enable-kvm -cdrom $(ISO) -m 64M
+
+# ─── Debug with QEMU + GDB ───────────────────────────────────────────────────
+debug: $(ISO)
+	qemu-system-i386 -cdrom $(ISO) -m 64M -s -S &
+	@echo "QEMU paused. Connect GDB with:"
+	@echo "  gdb $(KERNEL)"
+	@echo "  (gdb) target remote localhost:1234"
+	@echo "  (gdb) continue"
+
+# ─── Clean ───────────────────────────────────────────────────────────────────
 clean:
-	rm -rf *.o $(OUTPUT_BIN) $(ISO) isodir $(OBJ_FILES)
+	rm -f $(OBJS)
+	@echo "[CLEAN] object files removed"
 
+fclean: clean
+	rm -f $(KERNEL) $(ISO)
+	rm -rf iso/
+	@echo "[FCLEAN] binaries removed"
+
+re: fclean all

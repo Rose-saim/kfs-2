@@ -1,114 +1,96 @@
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+/* src/kernel.c
+ * KFS_2 — GDT & Stack
+ * Kernel entry point.
+ */
 
-/* Check if the compiler thinks you are targeting the wrong operating system. */
-#if defined(__linux__)
-#error "You are not using a cross-compiler, you will most certainly run into trouble"
-#endif
+#include "gdt.h"
+#include "printk.h"
+#include "stack.h"
 
-/* This tutorial will only work for the 32-bit ix86 targets. */
-#if !defined(__i386__)
-#error "This tutorial needs to be compiled with a ix86-elf compiler"
-#endif
+/* Multiboot magic expected from bootloader */
+#define MULTIBOOT_MAGIC 0x2BADB002
 
-/* Hardware text mode color constants. */
-enum vga_color {
-	VGA_COLOR_BLACK = 0,
-	VGA_COLOR_BLUE = 1,
-	VGA_COLOR_GREEN = 2,
-	VGA_COLOR_CYAN = 3,
-	VGA_COLOR_RED = 4,
-	VGA_COLOR_MAGENTA = 5,
-	VGA_COLOR_BROWN = 6,
-	VGA_COLOR_LIGHT_GREY = 7,
-	VGA_COLOR_DARK_GREY = 8,
-	VGA_COLOR_LIGHT_BLUE = 9,
-	VGA_COLOR_LIGHT_GREEN = 10,
-	VGA_COLOR_LIGHT_CYAN = 11,
-	VGA_COLOR_LIGHT_RED = 12,
-	VGA_COLOR_LIGHT_MAGENTA = 13,
-	VGA_COLOR_LIGHT_BROWN = 14,
-	VGA_COLOR_WHITE = 15,
-};
-
-static inline uint8_t vga_entry_color(enum vga_color fg, enum vga_color bg) 
+/* ─── Banner ───────────────────────────────────────────────────────────────── */
+static void print_banner(void)
 {
-	return fg | bg << 4;
+    printk_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK,
+        " _  _______ ____    ____\n"
+        "| |/ /  ___/ ___|  |___ \\\n"
+        "| ' /| |_  \\___ \\    __) |\n"
+        "| . \\|  _|  ___) |  / __/\n"
+        "|_|\\_\\_|   |____/  |_____|\n\n");
+
+    printk_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK,
+        "  KFS_2  —  Global Descriptor Table & Stack\n");
+    printk_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK,
+        "  i386 protected mode kernel\n\n");
 }
 
-static inline uint16_t vga_entry(unsigned char uc, uint8_t color) 
+/* ─── Dummy functions to produce a visible call stack ──────────────────────── */
+static void __attribute__((noinline)) level_c(void)
 {
-	return (uint16_t) uc | (uint16_t) color << 8;
+    printk_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK,
+        "[stack] Capturing stack from level_c() ...\n");
+    print_stack_trace();
+
+    /* Also dump 64 bytes around current ESP */
+    uint32_t esp;
+    __asm__ volatile("mov %%esp, %0" : "=r"(esp));
+    print_stack_dump(esp, 64);
 }
 
-size_t strlen(const char* str) 
+static void __attribute__((noinline)) level_b(void)
 {
-	size_t len = 0;
-	while (str[len])
-		len++;
-	return len;
+    level_c();
 }
 
-static const size_t VGA_WIDTH = 80;
-static const size_t VGA_HEIGHT = 25;
-
-size_t terminal_row;
-size_t terminal_column;
-uint8_t terminal_color;
-uint16_t* terminal_buffer;
-
-void terminal_initialize(void) 
+static void __attribute__((noinline)) level_a(void)
 {
-	terminal_row = 0;
-	terminal_column = 0;
-	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-	terminal_buffer = (uint16_t*) 0xB8000;
-	for (size_t y = 0; y < VGA_HEIGHT; y++) {
-		for (size_t x = 0; x < VGA_WIDTH; x++) {
-			const size_t index = y * VGA_WIDTH + x;
-			terminal_buffer[index] = vga_entry(' ', terminal_color);
-		}
-	}
+    level_b();
 }
 
-void terminal_setcolor(uint8_t color) 
+/* ─── kernel_main ──────────────────────────────────────────────────────────── */
+void kernel_main(uint32_t mb_magic, uint32_t mb_info)
 {
-	terminal_color = color;
-}
+    (void)mb_info;  /* unused for now */
 
-void terminal_putentryat(char c, uint8_t color, size_t x, size_t y) 
-{
-	const size_t index = y * VGA_WIDTH + x;
-	terminal_buffer[index] = vga_entry(c, color);
-}
+    /* 1. Init VGA terminal */
+    terminal_init();
+    print_banner();
 
-void terminal_putchar(char c) 
-{
-	terminal_putentryat(c, terminal_color, terminal_column, terminal_row);
-	if (++terminal_column == VGA_WIDTH) {
-		terminal_column = 0;
-		if (++terminal_row == VGA_HEIGHT)
-			terminal_row = 0;
-	}
-}
+    /* 2. Check multiboot magic */
+    if (mb_magic != MULTIBOOT_MAGIC) {
+        printk_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK,
+            "[WARN] Bad multiboot magic: 0x%08x (expected 0x%08x)\n",
+            mb_magic, MULTIBOOT_MAGIC);
+    } else {
+        printk_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK,
+            "[OK]   Multiboot magic verified: 0x%08x\n", mb_magic);
+    }
 
-void terminal_write(const char* data, size_t size) 
-{
-	for (size_t i = 0; i < size; i++)
-		terminal_putchar(data[i]);
-}
+    /* 3. Install GDT at 0x00000800 */
+    printk_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK,
+        "[*]    Installing GDT at 0x%08x ...\n", GDT_BASE_ADDRESS);
+    gdt_init();
+    printk_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK,
+        "[OK]   GDT loaded successfully.\n\n");
 
-void terminal_writestring(const char* data) 
-{
-	terminal_write(data, strlen(data));
-}
+    /* 4. Print GDT contents */
+    gdt_print();
 
-void kernel_main(void) 
-{
-	/* Initialize terminal interface */
-	terminal_initialize();
+    /* 5. Print CPU register snapshot */
+    print_registers();
 
-	/* Newline support is left as an exercise. */
-	terminal_writestring("Hello, kernel World!\n");
+    /* 6. Demonstrate stack trace through a call chain */
+    printk_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK,
+        "[*]    Generating call chain: kernel_main -> level_a -> level_b -> level_c\n");
+    level_a();
+
+    /* 7. Done */
+    printk_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK,
+        "\n[OK]   KFS_2 complete. System halted.\n");
+
+    for (;;) {
+        __asm__ volatile("cli; hlt");
+    }
 }
