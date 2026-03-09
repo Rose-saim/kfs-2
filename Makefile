@@ -21,7 +21,7 @@ ISO     := kfs2.iso
 # ─── Flags ──────────────────────────────────────────────────────────────────
 # -m32              : compile for i386
 # -fno-builtin      : don't use GCC built-in functions (no libc)
-# -fno-exceptions   : no C++ exception tables
+# -fno-exception (sujet) = -fno-exceptions (GCC) : pas de tables d'exceptions C++
 # -fno-stack-protector : no canary (no libc support)
 # -fno-rtti         : no run-time type info
 # -nostdlib         : don't link standard startup files
@@ -36,6 +36,7 @@ CFLAGS  := -m32 \
             -fno-stack-protector \
             -fno-rtti \
             -nostdlib \
+            -fno-omit-frame-pointer \
             -nodefaultlibs \
             -Iinclude
 
@@ -84,10 +85,10 @@ iso: $(ISO)
 $(ISO): $(KERNEL)
 	@mkdir -p iso/boot/grub
 	@cp $(KERNEL) iso/boot/
-	@echo 'set timeout=0'                          >  iso/boot/grub/grub.cfg
+	@echo 'set timeout=-1'                          >  iso/boot/grub/grub.cfg
 	@echo 'set default=0'                          >> iso/boot/grub/grub.cfg
 	@echo 'menuentry "KFS_2 - GDT & Stack" {'     >> iso/boot/grub/grub.cfg
-	@echo '    multiboot2 /boot/kfs2.bin'           >> iso/boot/grub/grub.cfg
+	@echo '    multiboot /boot/kfs2.bin'           >> iso/boot/grub/grub.cfg
 	@echo '    boot'                               >> iso/boot/grub/grub.cfg
 	@echo '}'                                      >> iso/boot/grub/grub.cfg
 	$(MKISO) -o $@ iso
